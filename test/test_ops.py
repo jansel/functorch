@@ -208,38 +208,6 @@ def get_vjp_fn_and_args_with_cotangents(f, sample, cotangents):
     return wrapped, tuple(flat_args + flat_cotangents)
 
 
-# returns a new function g(*args, *cotangents)
-# that computes vjps and (*args, cotangents) using torch.autograd.grad
-def get_autograd_fn_and_args_with_cotangents(f, sample, cotangents):
-    args = tuple([sample.input] + list(sample.args))
-    kwargs = sample.kwargs
-    flat_args, _ = tree_flatten(args)
-    flat_cotangents, cotangents_spec = tree_flatten(cotangents)
-
-    @functools.wraps(f)
-    def wrapped(*cotangents):
-        def is_differentiable(out):
-            return isinstance(out, Tensor) and (out.grad_fn is not None or out.requires_grad)
-
-        assert len(cotangents) == len(flat_cotangents)
-
-        fn, primals = normalize_op_input_output3(f, args, kwargs,
-                                                 flat_args,
-                                                 sample.output_process_fn_grad)
-        out = fn(*primals)
-        if not isinstance(out, tuple):
-            out = (out,)
-        filtered_primals = [primal for primal in primals if primal.requires_grad]
-        flattened_out, _ = tree_flatten(out)
-        out_cotangent = zip(out, cotangents)
-        filtered_out_cotangent = [(out, cotangent) for (out, cotangent) in out_cotangent if is_differentiable(out)]
-        filtered_out, filtered_cotangents = zip(*filtered_out_cotangent)
-        grads = torch.autograd.grad(filtered_out, filtered_primals, grad_outputs=cotangents, allow_unused=True)
-        return [grad for grad in grads if grad is not None]
-
-    return wrapped, flat_cotangents
-
-
 # Returns a new function g(*args, *cotangents) that computes vjps and
 # sample (*args, *cotangents)
 def get_vjpfull_variant(f, sample):
@@ -1308,17 +1276,6 @@ class TestOperators(TestCase):
 
     @skipOps('TestOperators', 'test_vmap_autograd_grad', {
         # randomness errors
-        xfail('bernoulli'),
-        xfail('nn.functional.dropout2d'),
-        xfail('nn.functional.dropout'),
-        xfail('nn.functional.feature_alpha_dropout', 'with_train'),
-        xfail('nn.functional.fractional_max_pool2d'),
-        xfail('nn.functional.fractional_max_pool3d'),
-        xfail('nn.functional.rrelu'),
-        xfail('normal'),
-        xfail('normal', 'number_mean'),
-        xfail('pca_lowrank'),
-        xfail('svd_lowrank'),
 
         # call inplace functions
         xfail('linalg.eigh'),  # inplace
@@ -1334,21 +1291,51 @@ class TestOperators(TestCase):
         xfail('nn.functional.max_unpool2d'),  # contiguous call
         xfail('to_sparse'),  # dispatch key issue
 
+        # vmap errors
+        xfail('__getitem__'),
+
         # numerical inconsistencies, look like bugs
-        xfail('nn.functional.binary_cross_entropy_with_logits', dtypes=(torch.float32,)),
+        xfail('nn.functional.binary_cross_entropy_with_logits', dtypes=(torch.float32, torch.float64)),
         xfail('ldexp', dtypes=(torch.float32,)),
     })
     @ops(functorch_lagging_op_db + additional_op_db, allowed_dtypes=(torch.float32, torch.double))
     def test_vmap_autograd_grad(self, device, dtype, op):
+        def is_differentiable(inp):
+            return isinstance(inp, Tensor) and (inp.grad_fn is not None or inp.requires_grad)
+
+        def get_flat_differentiable(pytree):
+            flattened = tree_flatten(pytree)[0]
+            return [i for i in flattened if is_differentiable(i)]
+
+        def filter_none(inp):
+            if isinstance(inp, list) or isinstance(inp, tuple):
+                return tuple(i for i in inp if isinstance(i, Tensor))
+            else:
+                return inp
+
         if not op.supports_autograd:
             self.skipTest("Skipped! Autograd not supported.")
             return
 
         sample_inputs = op.sample_inputs(device, dtype, requires_grad=True)
         for sample_input in sample_inputs:
-            cotangents = get_sample_cotangents(op, sample_input)
-            f, args = get_autograd_fn_and_args_with_cotangents(op, sample_input, cotangents)
-            for loop_out, batched_out in get_fallback_and_vmap_exhaustive(f, args, {}, opinfo=op):
+            fn, primals = normalize_op_input_output(op, sample_input)
+            out = fn(*primals)
+            cotangents = tree_map(torch.randn_like, out)
+
+            def compute_grad(cotangents):
+                outs = out
+                if isinstance(out, tuple):
+                    out_and_cotangents = zip(out, cotangents)
+                    out_and_cotangents = [(o, cotangent) for (o, cotangent) in out_and_cotangents if is_differentiable(o)]
+                    outs, cotangents = zip(*out_and_cotangents)
+
+                return filter_none(
+                    torch.autograd.grad(outs, get_flat_differentiable(primals), cotangents,
+                                        retain_graph=True, allow_unused=True))
+
+            for loop_out, batched_out in get_fallback_and_vmap_exhaustive(compute_grad, (cotangents,), {}, opinfo=op):
+                self.assertEqual(loop_out, batched_out)
                 self.assertEqual(loop_out, batched_out)
 
 
