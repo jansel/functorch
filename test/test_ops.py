@@ -1275,8 +1275,6 @@ class TestOperators(TestCase):
                 self._compare_jacobians_of_vjp(fn, (cotangents, input, weight, bias))
 
     @skipOps('TestOperators', 'test_vmap_autograd_grad', {
-        # randomness errors
-
         # call inplace functions
         xfail('linalg.eigh'),  # inplace
         xfail('linalg.householder_product'),  # inplace
@@ -1305,13 +1303,16 @@ class TestOperators(TestCase):
 
         def get_flat_differentiable(pytree):
             flattened = tree_flatten(pytree)[0]
-            return [i for i in flattened if is_differentiable(i)]
+            return tuple(i for i in flattened if is_differentiable(i))
 
-        def filter_none(inp):
-            if isinstance(inp, list) or isinstance(inp, tuple):
-                return tuple(i for i in inp if isinstance(i, Tensor))
-            else:
-                return inp
+        def get_differentiable_linked(list1, list2):
+            paired_list = zip(list1, list2)
+            paired_list = tuple((first, second) for (first, second) in paired_list if is_differentiable(first))
+            return zip(*paired_list)
+
+        def filter_none(out):
+            flattened = tree_flatten(out)[0]
+            return tuple(o for o in flattened if o is not None)
 
         if not op.supports_autograd:
             self.skipTest("Skipped! Autograd not supported.")
@@ -1324,18 +1325,18 @@ class TestOperators(TestCase):
             cotangents = tree_map(torch.randn_like, out)
 
             def compute_grad(cotangents):
-                outs = out
-                if isinstance(out, tuple):
-                    out_and_cotangents = zip(out, cotangents)
-                    out_and_cotangents = [(o, cotangent) for (o, cotangent) in out_and_cotangents if is_differentiable(o)]
-                    outs, cotangents = zip(*out_and_cotangents)
+                out_flattened = out
+                cotangents_flattened = cotangents
+                if not isinstance(out_flattened, torch.Tensor):
+                    out_flattened = tree_flatten(out)[0]
+                    cotangents_flattened = tree_flatten(cotangents)[0]
+                    out_flattened, cotangents_flattened = get_differentiable_linked(out_flattened, cotangents_flattened)
 
                 return filter_none(
-                    torch.autograd.grad(outs, get_flat_differentiable(primals), cotangents,
+                    torch.autograd.grad(out_flattened, get_flat_differentiable(primals), cotangents_flattened,
                                         retain_graph=True, allow_unused=True))
 
             for loop_out, batched_out in get_fallback_and_vmap_exhaustive(compute_grad, (cotangents,), {}, opinfo=op):
-                self.assertEqual(loop_out, batched_out)
                 self.assertEqual(loop_out, batched_out)
 
 
