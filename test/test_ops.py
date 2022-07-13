@@ -1276,10 +1276,8 @@ class TestOperators(TestCase):
 
     @skipOps('TestOperators', 'test_vmap_autograd_grad', {
         # call inplace functions
-        xfail('linalg.eigh'),  # inplace
         xfail('linalg.householder_product'),  # inplace
         xfail('matrix_exp'),  # inplace
-        xfail('symeig'),  # inplace
         xfail('take'),  # inplace
 
         xfail('linalg.eig'),  # all close?
@@ -1290,7 +1288,6 @@ class TestOperators(TestCase):
         xfail('to_sparse'),  # dispatch key issue
 
         # numerical inconsistencies, look like bugs
-        xfail('nn.functional.binary_cross_entropy_with_logits', dtypes=(torch.float32, torch.float64)),
         xfail('ldexp', dtypes=(torch.float32,), device_type='cpu'),
         skip('__rmatmul__', dtypes=(torch.float32,), device_type='cpu'),  # fails on all but windows
         skip('matmul', dtypes=(torch.float32,), device_type='cpu'),  # fails on all but windows
